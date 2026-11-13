@@ -1,0 +1,157 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# DESPLEGAR · la publicación automática (CD) en Cloudflare Workers
+#
+#   merge (push) a main        →  PRODUCCIÓN   <worker>.<subdominio>.workers.dev
+#   push a la rama staging     →  STAGING fijo staging-<worker>.<subdominio>.workers.dev
+#   Pull Request de este repo  →  PREVIEW de ese PR (la URL se publica en un comentario)
+#
+# Los proyectos de Lovable ya vienen preparados para Cloudflare Workers:
+# al compilar (npm run build) se genera solo la configuración de publicación.
+#
+# Qué necesita: dos secretos de GitHub (Settings → Secrets and variables → Actions):
+#   CLOUDFLARE_API_TOKEN y CLOUDFLARE_ACCOUNT_ID.
+# En un fork no existen esos secretos, así que este workflow NO se ejecuta allí.
+# ─────────────────────────────────────────────────────────────────────────────
+name: Desplegar
+
+on:
+  push:
+    branches: [main, staging]
+  pull_request:
+
+
+permissions:
+  contents: read
+
+# Si llegan dos despliegues de la misma rama, se publican en orden, sin pisarse.
+concurrency:
+  group: desplegar-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  publicar:
+    name: Publicar en Cloudflare Workers
+    # Solo en el repositorio original y, si es un PR, solo si viene de este mismo repo.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write        # solo para dejar el comentario con la URL de preview
+    steps:
+      - name: 0. Comprobar que existen los secretos de Cloudflare
+        env:
+          TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CUENTA: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$TOKEN" ] || [ -z "$CUENTA" ]; then
+            echo "::error::Faltan los secretos CLOUDFLARE_API_TOKEN y/o CLOUDFLARE_ACCOUNT_ID (Settings → Secrets and variables → Actions)."
+            exit 1
+          fi
+
+      - name: 1. Coger el código
+        uses: actions/checkout@v4
+
+      - name: 2. Preparar Node y Bun (Lovable usa Bun y su bun.lock)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.1
+
+      - name: 3. Instalar dependencias (exactamente las del bun.lock)
+        run: bun install --frozen-lockfile
+
+      - name: 4. Pasar las pruebas (lo que no está en verde no se publica)
+        run: bun run test
+
+      - name: 5. Compilar (genera la app y su configuración para Cloudflare)
+        run: bun run build
+
+      - name: 6. Decidir a qué entorno va
+        id: destino
+        env:
+          EVENTO: ${{ github.event_name }}
+          RAMA_PR: ${{ github.head_ref }}    # nombre de la rama del PR
+          RAMA: ${{ github.ref_name }}       # rama del push
+        run: |
+          if [ "$EVENTO" = "pull_request" ]; then
+            # El alias de la preview: minúsculas, letras, números y guiones (máx. 30)
+            alias=$(echo "$RAMA_PR" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' | cut -c1-30 | sed -E 's/-+$//')
+            echo "modo=preview" >> "$GITHUB_OUTPUT"
+            echo "alias=$alias" >> "$GITHUB_OUTPUT"
+          elif [ "$RAMA" = "main" ]; then
+            echo "modo=produccion" >> "$GITHUB_OUTPUT"
+          else
+            echo "modo=preview" >> "$GITHUB_OUTPUT"
+            echo "alias=staging" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 7. Publicar
+        id: publicar
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          MODO: ${{ steps.destino.outputs.modo }}
+          ALIAS: ${{ steps.destino.outputs.alias }}
+        run: |
+          set -o pipefail
+          # El servidor de la app también necesita los valores públicos de Supabase
+          # que Lovable guarda en .env. Sin ellos, la web publicada da error 500.
+          VARS=()
+          for nombre in SUPABASE_URL SUPABASE_PUBLISHABLE_KEY; do
+            valor=$(grep -E "^$nombre=" .env 2>/dev/null | cut -d= -f2- | tr -d '"\r' || true)
+            if [ -n "$valor" ]; then VARS+=(--var "$nombre:$valor"); fi
+          done
+          if [ "$MODO" = "produccion" ]; then
+            # Producción: publica la nueva versión para todos los usuarios
+            npx --yes wrangler@4.151.3 deploy "${VARS[@]}" | tee salida.txt
+            url=$(grep -oE 'https://[^ ]+\.workers\.dev' salida.txt | head -1)
+          else
+            # Staging / preview: sube una versión SIN tocar producción, con su propia URL
+            npx --yes wrangler@4.151.3 versions upload --preview-alias "$ALIAS" "${VARS[@]}" | tee salida.txt
+            url=$(grep -oE 'Version Preview Alias URL: https://[^ ]+' salida.txt | sed 's/.*: //' || true)
+            if [ -z "$url" ]; then
+              url=$(grep -oE 'Version Preview URL: https://[^ ]+' salida.txt | sed 's/.*: //')
+            fi
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "Publicado en: $url" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 8. Dejar la URL de preview en el PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          URL: ${{ steps.publicar.outputs.url }}
+        with:
+          script: |
+            const marca = '<!-- preview-cloudflare -->';
+            const cuerpo = `${marca}\n🔎 **Preview de este PR (staging):** ${process.env.URL}\n\n` +
+              'Pruébalo como lo vería un usuario antes de aprobar el merge.';
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comentarios = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+            const anterior = comentarios.find((c) => c.body && c.body.includes(marca));
+            if (anterior) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: anterior.id, body: cuerpo });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body: cuerpo });
+            }
+
+      - name: 9. Comprobar que la web responde
+        env:
+          URL: ${{ steps.publicar.outputs.url }}
+        run: |
+          # Verde no significa que funcione: si la web publicada da error, el check sale en rojo.
+          for intento in 1 2 3 4 5 6; do
+            codigo=$(curl -s -o /dev/null -m 15 -w '%{http_code}' "$URL/" || true)
+            if [ "$codigo" -ge 200 ] && [ "$codigo" -lt 500 ]; then
+              echo "La web responde ($codigo): $URL"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::La web se ha publicado, pero da error ($codigo): $URL"
+          exit 1
