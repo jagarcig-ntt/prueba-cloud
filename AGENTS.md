@@ -28,3 +28,5 @@ use the editor.
   own key and store it in Secrets.
 - **Secrets.** Lovable manages them. Do not put secret values in the repo.
 <!-- LOVABLE:END -->
+
+- Keep public-note access separate from private notes: the public table grants anonymous SELECT only, so existing owner-scoped notes stay private.

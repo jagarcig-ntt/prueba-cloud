@@ -14,6 +14,24 @@ export type Database = {
   }
   public: {
     Tables: {
+      notas_publicas: {
+        Row: {
+          id: string
+          texto: string
+          titulo: string
+        }
+        Insert: {
+          id?: string
+          texto?: string
+          titulo?: string
+        }
+        Update: {
+          id?: string
+          texto?: string
+          titulo?: string
+        }
+        Relationships: []
+      }
       notes: {
         Row: {
           content: string
