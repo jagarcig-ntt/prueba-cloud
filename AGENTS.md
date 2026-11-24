@@ -30,3 +30,4 @@ use the editor.
 <!-- LOVABLE:END -->
 
 - Keep public-note access separate from private notes: the public table grants anonymous SELECT only, so existing owner-scoped notes stay private.
+- Registration-only personal fields are validated with the shared schema and kept in transient form state, not auth metadata or console logs; only email/password are submitted to the existing auth service to minimize stored personal data.

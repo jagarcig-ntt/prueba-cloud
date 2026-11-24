@@ -2,6 +2,12 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState, type FormEvent } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { supabase } from "@/integrations/supabase/client";
+import { Button } from "@/components/ui/button";
+import { Calendar } from "@/components/ui/calendar";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { CalendarIcon } from "lucide-react";
+import { es } from "date-fns/locale";
+import { registrationSchema } from "@/lib/registration";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -43,36 +49,85 @@ function Auth() {
   const [password, setPassword] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [dni, setDni] = useState("");
+  const [birthDate, setBirthDate] = useState<Date>();
+  const [calendarOpen, setCalendarOpen] = useState(false);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    setBusy(true);
     setMsg(null);
+    if (mode === "up") {
+      const result = registrationSchema.safeParse({ name, email, phone, dni, birthDate, password });
+      if (!result.success) {
+        setMsg(result.error.issues[0]?.message ?? "Revisa los datos del formulario.");
+        return;
+      }
+    }
+    setBusy(true);
+    try {
+    // Only account credentials are sent to auth; extra details never enter logs or storage.
     const { data, error } =
       mode === "in"
-        ? await supabase.auth.signInWithPassword({ email, password })
-        : await supabase.auth.signUp({ email, password, options: { emailRedirectTo: window.location.origin } });
-    setBusy(false);
+        ? await supabase.auth.signInWithPassword({ email: email.trim(), password })
+        : await supabase.auth.signUp({ email: email.trim(), password, options: { emailRedirectTo: window.location.origin } });
     if (error) setMsg(error.message);
-    else if (mode === "up" && !data.session) setMsg("Revisa tu correo para confirmar la cuenta.");
+    else if (mode === "up") {
+      setName(""); setPhone(""); setDni(""); setBirthDate(undefined);
+      if (!data.session) setMsg("Revisa tu correo para confirmar la cuenta.");
+    }
+    } catch {
+      setMsg("No se pudo completar el envío. Inténtalo de nuevo.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center px-4">
+    <main className="flex min-h-screen items-center justify-center px-4 py-8">
       <div className="w-full max-w-sm">
         <h1 className="text-5xl font-bold text-foreground">Cuaderno</h1>
         <p className="mt-2 text-muted-foreground">Tus notas, solo para ti.</p>
         <form onSubmit={submit} className="mt-8 space-y-3 rounded-lg bg-card p-6 shadow-note">
-          <input className={input} type="email" required placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} />
-          <input className={input} type="password" required minLength={6} placeholder="Contraseña" value={password} onChange={(e) => setPassword(e.target.value)} />
-          <button className={`${btn} w-full`} disabled={busy}>
-            {mode === "in" ? "Iniciar sesión" : "Crear cuenta"}
-          </button>
-          {msg && <p className="text-sm text-muted-foreground">{msg}</p>}
+          {mode === "up" && <label className="block space-y-1 text-sm">Nombre
+            <input className={input} autoComplete="name" required maxLength={100} value={name} onChange={(e) => setName(e.target.value)} />
+          </label>}
+          <label className="block space-y-1 text-sm">Email
+            <input className={input} type="email" autoComplete="email" required maxLength={254} placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} />
+          </label>
+          {mode === "up" && <>
+            <label className="block space-y-1 text-sm">Teléfono
+              <input className={input} type="tel" autoComplete="tel" required maxLength={20} value={phone} onChange={(e) => setPhone(e.target.value)} />
+            </label>
+            <label className="block space-y-1 text-sm">DNI
+              <input className={input} required maxLength={9} value={dni} onChange={(e) => setDni(e.target.value)} />
+            </label>
+            <div className="space-y-1 text-sm">
+              <label htmlFor="birth-date">Fecha de nacimiento</label>
+              <Popover open={calendarOpen} onOpenChange={setCalendarOpen}>
+                <PopoverTrigger asChild>
+                  <Button id="birth-date" type="button" variant="outline" className="w-full justify-start font-normal">
+                    <CalendarIcon />{birthDate ? birthDate.toLocaleDateString("es-ES") : "Selecciona una fecha"}
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent align="start" className="pointer-events-auto w-auto p-0">
+                  <Calendar mode="single" locale={es} captionLayout="dropdown" startMonth={new Date(1900, 0)} endMonth={new Date()} disabled={{ after: new Date() }} {...(birthDate ? { selected: birthDate } : {})} onSelect={(date) => { setBirthDate(date); if (date) setCalendarOpen(false); }} />
+                </PopoverContent>
+              </Popover>
+            </div>
+          </>}
+          <label className="block space-y-1 text-sm">Contraseña
+            <input className={input} type="password" autoComplete={mode === "in" ? "current-password" : "new-password"} required minLength={6} placeholder="Contraseña" value={password} onChange={(e) => setPassword(e.target.value)} />
+          </label>
+          <Button type="submit" className="w-full" disabled={busy}>
+            {busy ? "Enviando…" : mode === "in" ? "Iniciar sesión" : "Crear cuenta"}
+          </Button>
+          {msg && <p role="status" className="text-sm text-muted-foreground">{msg}</p>}
         </form>
-        <button className="mt-4 text-sm text-primary underline-offset-4 hover:underline" onClick={() => { setMode(mode === "in" ? "up" : "in"); setMsg(null); }}>
+        <Button type="button" variant="link" className="mt-4 h-auto whitespace-normal px-0 text-left" onClick={() => { setMode(mode === "in" ? "up" : "in"); setMsg(null); setName(""); setPhone(""); setDni(""); setBirthDate(undefined); }}>
           {mode === "in" ? "¿No tienes cuenta? Regístrate" : "¿Ya tienes cuenta? Inicia sesión"}
-        </button>
+        </Button>
       </div>
     </main>
   );
